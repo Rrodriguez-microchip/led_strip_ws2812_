@@ -1,0 +1,72 @@
+/*
+ * WS2812 LED strip overlay for SAM E54 Xplained Pro
+ * Uses SPI (SERCOM4) for timing generation
+ *
+ * SPI Mode 0 (CPOL=0, CPHA=0) ensures MOSI idles LOW
+ * which is required for WS2812 communication
+ */
+
+#include <zephyr/dt-bindings/led/led.h>
+
+/ {
+	aliases {
+		led-strip = &led_strip;
+	};
+};
+
+/* Custom pinctrl to ensure PB27 (MOSI) has no pull-up */
+&pinctrl {
+	sercom4_spi_ws2812: sercom4_spi_ws2812 {
+		group1 {
+			pinmux = <PB26D_SERCOM4_PAD1>,  /* SCK */
+				 <PB27D_SERCOM4_PAD0>,  /* MOSI - no pull resistor */
+				 <PB29D_SERCOM4_PAD3>;  /* MISO */
+			/* No bias property = no pull-up/pull-down (default state) */
+		};
+	};
+};
+
+&sercom4 {
+	status = "okay";
+	compatible = "atmel,sam0-spi";
+	dipo = <3>;  /* 0 MISO on PAD3 (PB29) */
+	dopo = <0>;  /* 1 MOSI on PAD0 (PB27), SCK on PAD1 (PB26) */
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	pinctrl-0 = <&sercom4_spi_ws2812>;
+	pinctrl-names = "default";
+
+	led_strip: ws2812@0 {
+		compatible = "worldsemi,ws2812-spi";
+
+		reg = <0>;
+		spi-max-frequency = <6400000>;  /* 6.4 MHz for WS2812 timing */
+
+		chain-length = <256>;  /* Testing with 5 LEDs first */
+
+		color-mapping = <LED_COLOR_ID_GREEN
+				 LED_COLOR_ID_RED
+				 LED_COLOR_ID_BLUE>;
+
+		reset-delay = <1000>;
+
+		/* SPI timing frames for WS2812 protocol */
+		/* At 6.4MHz: each bit is ~156ns */
+		/* WS2812 timing: 0 = 400ns H + 850ns L, 1 = 800ns H + 450ns L */
+		/* Standard patterns work correctly - line should idle LOW naturally */
+		//spi-one-frame = <0xf0>;   /* 0b11110000: ~625ns high, ~625ns low */
+		//spi-zero-frame = <0xc0>;  /* 0b11000000: ~312ns high, ~938ns low */
+		spi-one-frame =  <0X78>;   /* 0b11110000: ~625ns high, ~625ns low */
+		spi-zero-frame = <0X60>;  /* 0b11000000: ~312ns high, ~938ns low */
+	};
+};
+
+/* Ensure ports are enabled */
+&porta {
+    status = "okay";
+};
+
+&portb {
+    status = "okay";
+};
