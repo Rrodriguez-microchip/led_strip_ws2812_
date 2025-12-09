@@ -113,20 +113,25 @@ void ws2812_update(void) {
     // Each WS2812 color byte (8 bits) becomes 8 SPI bytes
     // Since we shift left by 1, we only use NUM_LEDS-1 actual LEDs (255 LEDs)
     // 255 LEDs * 3 colors * 8 SPI bytes per color byte = 6120 bytes
-    // Add extra reset bytes at the end to ensure line idles LOW
-    static uint8_t spi_buf[(NUM_LEDS - 1) * 3 * 8 + 8];
+    // Add leading zeros to force line LOW and ensure proper alignment
+    // Add trailing zeros at the end to ensure line idles LOW during reset
+    static uint8_t spi_buf[24 + (NUM_LEDS - 1) * 3 * 8 + 8];  // +24 leading zeros
     uint16_t spi_idx = 0;
 
+  // Add trailing zeros to force line LOW during reset
+    for (int i = 0; i < 8; i++) {
+        spi_buf[spi_idx++] = 0x00;
+    }
     // Convert RGB buffer to SPI timing pattern
     // Note: Bad LED compensation is now handled in ws2812_set_pixel() by shifting left when writing
     // Since we shift left, the last LED (index NUM_LEDS-1) is never written to, so only send NUM_LEDS-1
     for (int i = 0; i < NUM_LEDS - 1; i++) {
-        // These LEDs expect BGR order - apply brightness scaling
-        // IMPORTANT: Leading with high values causes alignment issues, so avoid high blue channel
+        // Compensate for byte-level shift: rotate color order by sending GRB instead of BGR
+        // This compensates for the SPI idle-high causing a bit/byte shift at second LED
         uint8_t colors[3] = {
-            (led_buffer[i].b * global_brightness) / 255,
-            (led_buffer[i].g * global_brightness) / 255,
-            (led_buffer[i].r * global_brightness) / 255
+            (led_buffer[i].g * global_brightness) / 255,  // G first (was B)
+            (led_buffer[i].r * global_brightness) / 255,  // R second (was G)
+            (led_buffer[i].b * global_brightness) / 255   // B third (was R)
         };
 
         LOG_DBG("LED %d: B=%d G=%d R=%d", i, colors[0], colors[1], colors[2]);
@@ -162,6 +167,35 @@ void ws2812_update(void) {
     }
 
     // WS2812 needs >50us reset time (line will idle at last bit = 0)
+    k_usleep(60);
+    
+}
+void ws2812_zeroes(void) {
+    // Send all zeros to turn off all LEDs
+    // Buffer size: same as normal update to ensure proper reset timing
+    static uint8_t spi_buf[22 + (NUM_LEDS - 1) * 3 * 8 + 8];
+
+    // Fill entire buffer with zeros
+    memset(spi_buf, 0x00, sizeof(spi_buf));
+
+    // Send via SPI
+    const struct spi_buf tx_buf = {
+        .buf = spi_buf,
+        .len = sizeof(spi_buf)
+    };
+    const struct spi_buf_set tx = {
+        .buffers = &tx_buf,
+        .count = 1
+    };
+
+    int ret = spi_write(spi_dev, &spi_cfg, &tx);
+    if (ret < 0) {
+        LOG_ERR("SPI write failed: %d", ret);
+    } else {
+        LOG_DBG("SPI zeroes - sent %d bytes", sizeof(spi_buf));
+    }
+
+    // WS2812 needs >50us reset time
     k_usleep(60);
 }
 

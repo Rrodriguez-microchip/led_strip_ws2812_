@@ -59,23 +59,30 @@ static float ball4_y = 4.0f;
 static float ball4_vx = 0.3f;
 static float ball4_vy = 0.25f;
 
-// Priority colors (rgb_t struct is {g, r, b} order, but LEDs expect BGR order)
+// Quadrant colors (rgb_t struct is {g, r, b} order, but LEDs expect BGR order)
 // To get specific colors with BGR LEDs: B=1st byte, G=2nd byte, R=3rd byte
 // So rgb_t{g, r, b} where r displays as green, b displays as red, g displays as blue
-static rgb_t get_priority_color(int priority) {
+static rgb_t get_priority_color(int priority_level) {
+    // Q1 uses priority level 2/4/6/8 to get dynamic colors based on button presses
+    // Q2, Q3, Q4 use fixed values (10, 11, 12) to get their static colors
     const rgb_t colors[] = {
         {0, 0, 0},         // 0: Not used
-        {0, 0, 0},       // 1: Red - {g=0(blue), r=0(green), b=255(red)}
-        {0, 128, 0},     // 2: Dark orange/red
-        {0, 128, 0},     // 3: Yellow - {g=0(blue), r=255(green), b=255(red)}
-        {0, 128,0},     // 4: Orange - {g=0(blue), r=128(green), b=255(red)}
-        {0, 128, 0},       // 5: Green - {g=0(blue), r=255(green), b=0(red)}
-        {0,128, 0},     // 6: Cyan - {g=255(blue), r=255(green), b=0(red)}
-        {0, 128, 0},       // 7: Blue - {g=255(blue), r=0(green), b=0(red)}
+        {0, 0, 0},         // 1: Not used
+        {32, 32, 0},       // 2: Q1 at HIGHEST - CYAN {g=32(blue), r=32(green), b=0(red)} = CYAN on display
+        {0, 0, 0},         // 3: Not used
+        {0, 64, 0},        // 4: Q1 at HIGH - GREEN {g=0(blue), r=64(green), b=0(red)} = GREEN on display
+        {0, 0, 0},         // 5: Not used
+        {0, 32, 32},       // 6: Q1 at MEDIUM - YELLOW {g=0(blue), r=32(green), b=32(red)} = YELLOW on display
+        {0, 0, 0},         // 7: Not used
+        {0, 0, 64},        // 8: Q1 at LOW - RED {g=0(blue), r=0(green), b=64(red)} = RED on display
+        {0, 0, 0},         // 9: Not used
+        {32, 32, 0},       // 10: Q2 - CYAN (matches Q1 highest) {g=32(blue), r=32(green), b=0(red)} = CYAN on display
+        {0, 32, 32},       // 11: Q3 - YELLOW {g=0(blue), r=32(green), b=32(red)} = YELLOW on display
+        {64, 0, 0},        // 12: Q4 - BLUE {g=64(blue), r=0(green), b=0(red)} = BLUE on display
     };
 
-    if (priority >= 0 && priority < 8) {
-        return colors[priority];
+    if (priority_level >= 0 && priority_level < 13) {
+        return colors[priority_level];
     }
     return colors[0];
 }
@@ -279,17 +286,19 @@ struct k_thread simple_quad1_thread_data;
 void simple_quad1_thread_entry(void *a, void *b, void *c) {
     LOG_INF("Quadrant 1 thread started - priority demo ball");
 
-    int priority = 5;  // Color for visualization
-
     while (1) {
         // Check if priority changed and update this thread's priority
         if (priority_changed) {
             k_thread_priority_set(k_current_get(), priority_levels[current_priority_index]);
             priority_changed = false;  // Reset flag after applying
+            LOG_INF("Q1 now at priority %s (%d) - watch the ball color change!",
+                    priority_names[current_priority_index],
+                    priority_levels[current_priority_index]);
         }
 
         k_mutex_lock(&matrix_mutex, K_FOREVER);
-        simple_quad1_animation(priority);
+        // Pass current priority level to animation for dynamic color
+        simple_quad1_animation(priority_levels[current_priority_index]);
         ws2812_update();  // Update display immediately while we have the lock
         k_mutex_unlock(&matrix_mutex);
         k_msleep(50);  // 20 FPS
@@ -301,16 +310,14 @@ K_THREAD_STACK_DEFINE(simple_quad2_stack, 1024);
 struct k_thread simple_quad2_thread_data;
 
 void simple_quad2_thread_entry(void *a, void *b, void *c) {
-    LOG_INF("Quadrant 2 thread started - fixed priority (high)");
-
-    int priority = 3;  // Color
+    LOG_INF("Quadrant 2 thread started - fixed priority (highest=2)");
 
     while (1) {
         k_mutex_lock(&matrix_mutex, K_FOREVER);
-        simple_quad2_animation(priority);
+        simple_quad2_animation(10);  // Fixed cyan color (index 10)
         ws2812_update();  // Update display immediately while we have the lock
         k_mutex_unlock(&matrix_mutex);
-        k_msleep(50);  // ~13 FPS
+        k_msleep(50);  // 20 FPS
     }
 }
 
@@ -319,16 +326,14 @@ K_THREAD_STACK_DEFINE(simple_quad3_stack, 1024);
 struct k_thread simple_quad3_thread_data;
 
 void simple_quad3_thread_entry(void *a, void *b, void *c) {
-    LOG_INF("Quadrant 3 thread started - fixed priority (medium)");
-
-    int priority = 4;  // Color
+    LOG_INF("Quadrant 3 thread started - fixed priority (medium=6)");
 
     while (1) {
         k_mutex_lock(&matrix_mutex, K_FOREVER);
-        simple_quad3_animation(priority);
+        simple_quad3_animation(11);  // Fixed yellow color (index 11)
         ws2812_update();  // Update display immediately while we have the lock
         k_mutex_unlock(&matrix_mutex);
-        k_msleep(75);  // ~13 FPS
+        k_msleep(50);  // 20 FPS
     }
 }
 
@@ -337,16 +342,14 @@ K_THREAD_STACK_DEFINE(simple_quad4_stack, 1024);
 struct k_thread simple_quad4_thread_data;
 
 void simple_quad4_thread_entry(void *a, void *b, void *c) {
-    LOG_INF("Quadrant 4 thread started - fixed priority (low)");
-
-    int priority = 6;  // Color
+    LOG_INF("Quadrant 4 thread started - fixed priority (lowest=8)");
 
     while (1) {
         k_mutex_lock(&matrix_mutex, K_FOREVER);
-        simple_quad4_animation(priority);
+        simple_quad4_animation(12);  // Fixed blue color (index 12)
         ws2812_update();  // Update display immediately while we have the lock
         k_mutex_unlock(&matrix_mutex);
-        k_msleep(100);  // 10 FPS
+        k_msleep(50);  // 20 FPS
     }
 }
 
@@ -370,13 +373,15 @@ void simple_test_init(void) {
     LOG_INF("  Zephyr Thread Priority Demo");
     LOG_INF("===========================================");
     LOG_INF("Q1 (Top-Left):     VARIABLE priority (button controlled)");
-    LOG_INF("Q2 (Top-Right):    HIGHEST priority (2) - always fastest");
-    LOG_INF("Q3 (Bottom-Left):  MEDIUM priority (6) - moderate");
-    LOG_INF("Q4 (Bottom-Right): LOWEST priority (8) - slowest");
+    LOG_INF("                   Color changes with priority:");
+    LOG_INF("                   CYAN(2) GREEN(4) YELLOW(6) RED(8)");
+    LOG_INF("Q2 (Top-Right):    HIGHEST priority (2) - CYAN");
+    LOG_INF("Q3 (Bottom-Left):  MEDIUM priority (6) - YELLOW");
+    LOG_INF("Q4 (Bottom-Right): LOWEST priority (8) - BLUE");
     LOG_INF("");
-    LOG_INF("Press SW0 to cycle Q1 priority:");
-    LOG_INF("  HIGHEST(2) -> HIGH(4) -> MEDIUM(6) -> LOW(8)");
-    LOG_INF("Watch Q1 ball smoothness change vs Q2/Q3/Q4!");
+    LOG_INF("Press SW0 to cycle Q1 priority and color:");
+    LOG_INF("  CYAN(2) -> GREEN(4) -> YELLOW(6) -> RED(8)");
+    LOG_INF("Watch Q1 change color and smoothness!");
     LOG_INF("===========================================");
 
 #if DT_NODE_HAS_STATUS(SW0_NODE, okay)
