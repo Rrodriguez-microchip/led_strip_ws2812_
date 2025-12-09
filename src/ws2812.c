@@ -9,7 +9,7 @@ LOG_MODULE_REGISTER(ws2812, LOG_LEVEL_INF);
 static rgb_t led_buffer[NUM_LEDS];
 
 // Global brightness control (0-255, where 255 = full brightness)
-static uint8_t global_brightness = 14;  // Start at 25% brightness for testing
+static uint8_t global_brightness = 255;  // Start at 25% brightness for testing
 
 // Mutex for thread-safe access
 K_MUTEX_DEFINE(matrix_mutex);
@@ -62,7 +62,21 @@ void ws2812_set_pixel(uint8_t x, uint8_t y, rgb_t color) {
         index = y * MATRIX_WIDTH + (MATRIX_WIDTH - 1 - x);
     }
 
-    if(index >= NUM_LEDS) return; // Safety check
+    // Compensate for bad LED at position 0 by shifting left
+    // Physical LED 0 is bad, so we skip it: write to index-1 in buffer
+    // This way: buffer[0]→LED 1, buffer[1]→LED 2, etc.
+    if (index > 0) {
+        index = index - 1;
+    } else {
+        // index 0 would go to bad LED, skip it
+        return;
+    }
+
+    // Safety check - with shift, we can only address NUM_LEDS-1
+    if(index >= NUM_LEDS - 1) {
+        LOG_WRN("Pixel write overflow: x=%d, y=%d, index=%d (limit=%d)", x, y, index, NUM_LEDS-1);
+        return;
+    }
 
     led_buffer[index] = color;
 }
@@ -79,6 +93,15 @@ rgb_t ws2812_get_pixel(uint8_t x, uint8_t y) {
         index = y * MATRIX_WIDTH + (MATRIX_WIDTH - 1 - x);
     }
 
+    // Apply same shift as set_pixel
+    if (index > 0) {
+        index = index - 1;
+    } else {
+        return (rgb_t){0, 0, 0};
+    }
+
+    if(index >= NUM_LEDS) return (rgb_t){0, 0, 0};
+
     return led_buffer[index];
 }
 
@@ -88,23 +111,25 @@ void ws2812_clear(void) {
 
 void ws2812_update(void) {
     // Each WS2812 color byte (8 bits) becomes 8 SPI bytes
-    // For testing with 5 LEDs: 5 LEDs * 3 colors * 8 bits = 120 bytes
+    // Since we shift left by 1, we only use NUM_LEDS-1 actual LEDs (255 LEDs)
+    // 255 LEDs * 3 colors * 8 SPI bytes per color byte = 6120 bytes
     // Add extra reset bytes at the end to ensure line idles LOW
-    static uint8_t spi_buf[NUM_LEDS * 3 * 8 + 8];  // Extra 8 bytes for reset
+    static uint8_t spi_buf[(NUM_LEDS - 1) * 3 * 8 + 8];
     uint16_t spi_idx = 0;
 
     // Convert RGB buffer to SPI timing pattern
-    // Shift buffer by 1: send led_buffer[i+1] to physical LED i
-    // This compensates for bad LED at physical position 0
+    // Note: Bad LED compensation is now handled in ws2812_set_pixel() by shifting left when writing
+    // Since we shift left, the last LED (index NUM_LEDS-1) is never written to, so only send NUM_LEDS-1
     for (int i = 0; i < NUM_LEDS - 1; i++) {
-        // WS2812 expects GRB order - apply brightness scaling
+        // These LEDs expect BGR order - apply brightness scaling
+        // IMPORTANT: Leading with high values causes alignment issues, so avoid high blue channel
         uint8_t colors[3] = {
-            (led_buffer[i + 1].g * global_brightness) / 255,
-            (led_buffer[i + 1].r * global_brightness) / 255,
-            (led_buffer[i + 1].b * global_brightness) / 255
+            (led_buffer[i].b * global_brightness) / 255,
+            (led_buffer[i].g * global_brightness) / 255,
+            (led_buffer[i].r * global_brightness) / 255
         };
 
-        LOG_DBG("LED %d: G=%d R=%d B=%d", i, colors[0], colors[1], colors[2]);
+        LOG_DBG("LED %d: B=%d G=%d R=%d", i, colors[0], colors[1], colors[2]);
 
         // Convert each color byte to SPI bits
         for (int c = 0; c < 3; c++) {

@@ -1,0 +1,258 @@
+# CMakeLists.txt Configuration for Quadrant Demo
+#
+# This file shows how to integrate the quadrant demo into your build.
+# You have two options:
+
+# ============================================================================
+# OPTION 1: Replace main.c with quadrant demo main (Recommended for workshops)
+# ============================================================================
+#
+# Before building:
+# 1. Backup your current main.c:
+#    cp src/main.c src/main_backup.c
+#
+# 2. Use the quadrant demo main:
+#    cp src/main_quadrant_demo.c src/main.c
+#
+# 3. Your existing CMakeLists.txt should work as-is:
+
+cmake_minimum_required(VERSION 3.20.0)
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(led_strip_ws2812)
+
+target_sources(app PRIVATE
+    src/main.c              # Now contains quadrant demo main
+    src/ws2812.c
+    src/patterns.c          # Original patterns (optional, can keep)
+    src/quadrant_demo.c     # ADD THIS LINE
+)
+
+# ============================================================================
+# OPTION 2: Keep your main.c and call demo from it
+# ============================================================================
+#
+# In your existing main.c, add:
+#   #include "quadrant_demo.h"
+#
+#   int main(void) {
+#       ws2812_init();
+#       ws2812_set_brightness(128);
+#       quadrant_demo_init();  // Start the demo
+#
+#       while (1) {
+#           k_msleep(10000);
+#       }
+#   }
+#
+# Then update CMakeLists.txt:
+
+cmake_minimum_required(VERSION 3.20.0)
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(led_strip_ws2812)
+
+target_sources(app PRIVATE
+    src/main.c              # Your existing main
+    src/ws2812.c
+    src/patterns.c          # Optional
+    src/quadrant_demo.c     # ADD THIS LINE
+)
+
+# ============================================================================
+# OPTION 3: Build as separate application
+# ============================================================================
+#
+# Create a new build configuration specifically for the demo
+
+cmake_minimum_required(VERSION 3.20.0)
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+project(quadrant_demo)
+
+target_sources(app PRIVATE
+    src/main_quadrant_demo.c    # Demo main
+    src/ws2812.c                # LED driver
+    src/quadrant_demo.c         # Demo implementation
+)
+
+# Then build with:
+#   west build -b same54_xpro -d build_quadrant_demo
+
+# ============================================================================
+# Required prj.conf settings (regardless of option chosen)
+# ============================================================================
+#
+# Make sure your prj.conf includes these lines:
+
+# Shell support for interactive commands
+CONFIG_SHELL=y
+CONFIG_SHELL_BACKEND_SERIAL=y
+CONFIG_SHELL_CMD_BUFF_SIZE=256
+CONFIG_SHELL_PRINTF_BUFF_SIZE=256
+
+# Thread runtime statistics
+CONFIG_THREAD_RUNTIME_STATS=y
+CONFIG_SCHED_THREAD_USAGE=y
+
+# Console
+CONFIG_CONSOLE=y
+CONFIG_UART_CONSOLE=y
+
+# Thread monitoring
+CONFIG_THREAD_MONITOR=y
+CONFIG_THREAD_NAME=y
+CONFIG_THREAD_STACK_INFO=y
+
+# Math library (for sine/cosine in animations)
+CONFIG_NEWLIB_LIBC=y
+CONFIG_NEWLIB_LIBC_FLOAT_PRINTF=y
+
+# ============================================================================
+# Build Commands
+# ============================================================================
+
+# Clean build:
+#   west build -t pristine
+#   west build -b same54_xpro
+#   west flash
+
+# Build with specific configuration:
+#   west build -b same54_xpro -- -DCONF_FILE=prj_quadrant.conf
+
+# Build with increased verbosity:
+#   west build -b same54_xpro -- -DCMAKE_VERBOSE_MAKEFILE=ON
+
+# ============================================================================
+# Troubleshooting Build Issues
+# ============================================================================
+
+# Issue: "undefined reference to quadrant_demo_init"
+# Solution: Add src/quadrant_demo.c to target_sources()
+
+# Issue: "quadrant_demo.h: No such file or directory"
+# Solution: Header files in src/ are automatically included.
+#           Make sure quadrant_demo.h is in src/ directory.
+
+# Issue: Shell commands not working
+# Solution: Verify CONFIG_SHELL=y in prj.conf
+
+# Issue: "undefined reference to sin/cos"
+# Solution: Add CONFIG_NEWLIB_LIBC=y in prj.conf
+
+# Issue: Stack overflow errors
+# Solution: Increase stack sizes in quadrant_demo.c:
+#           #define STACK_SIZE 2048  // was 1024
+
+# ============================================================================
+# Advanced: Conditional Compilation
+# ============================================================================
+
+# If you want to conditionally include the demo:
+
+option(ENABLE_QUADRANT_DEMO "Enable quadrant demo" ON)
+
+if(ENABLE_QUADRANT_DEMO)
+    target_sources(app PRIVATE
+        src/quadrant_demo.c
+    )
+    target_compile_definitions(app PRIVATE
+        QUADRANT_DEMO_ENABLED=1
+    )
+endif()
+
+# Then in your main.c:
+#   #ifdef QUADRANT_DEMO_ENABLED
+#   #include "quadrant_demo.h"
+#   #endif
+#
+#   int main(void) {
+#       ws2812_init();
+#       #ifdef QUADRANT_DEMO_ENABLED
+#       quadrant_demo_init();
+#       #else
+#       // Your original code
+#       #endif
+#   }
+
+# Build with demo disabled:
+#   west build -b same54_xpro -- -DENABLE_QUADRANT_DEMO=OFF
+
+# ============================================================================
+# Memory Optimization
+# ============================================================================
+
+# If RAM is limited, you can reduce stack sizes:
+
+# In quadrant_demo.c, change:
+#   #define STACK_SIZE 1024
+# To:
+#   #define STACK_SIZE 768
+
+# Or reduce number of threads by commenting out in quadrant_demo_init():
+#   // k_thread_create(&quad3_thread_data, ...);  // Disable Thread 3
+#   // k_thread_create(&quad4_thread_data, ...);  // Disable Thread 4
+
+# ============================================================================
+# Flash Size Optimization
+# ============================================================================
+
+# If flash is limited, add to prj.conf:
+CONFIG_SIZE_OPTIMIZATIONS=y
+CONFIG_LOG_MODE_MINIMAL=y
+CONFIG_SHELL_MINIMAL=y
+
+# Or disable logging entirely:
+CONFIG_LOG=n
+
+# ============================================================================
+# Debugging Options
+# ============================================================================
+
+# Enable debug symbols:
+CONFIG_DEBUG=y
+CONFIG_DEBUG_OPTIMIZATIONS=y
+
+# Enable thread runtime statistics:
+CONFIG_THREAD_RUNTIME_STATS=y
+CONFIG_SCHED_THREAD_USAGE=y
+
+# Enable stack sentinel (detect stack overflow):
+CONFIG_THREAD_STACK_INFO=y
+CONFIG_INIT_STACKS=y
+
+# Enable CPU load measurement:
+CONFIG_THREAD_RUNTIME_STATS=y
+
+# ============================================================================
+# Example: Full CMakeLists.txt for Quadrant Demo
+# ============================================================================
+
+cmake_minimum_required(VERSION 3.20.0)
+
+# Find Zephyr package
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+
+# Project name
+project(led_strip_ws2812_quadrant_demo)
+
+# Source files
+target_sources(app PRIVATE
+    src/main_quadrant_demo.c    # Main entry point
+    src/ws2812.c                # WS2812 LED driver
+    src/quadrant_demo.c         # Quadrant demo implementation
+)
+
+# Optional: Add compile definitions
+target_compile_definitions(app PRIVATE
+    MATRIX_WIDTH=16
+    MATRIX_HEIGHT=16
+)
+
+# Optional: Add include directories (if needed)
+# target_include_directories(app PRIVATE
+#     include/
+# )
+
+# That's it! The demo should now build successfully.
+
+# ============================================================================
+# End of CMakeLists.txt configuration guide
+# ============================================================================

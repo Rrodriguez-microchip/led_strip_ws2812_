@@ -1,0 +1,653 @@
+#include "quadrant_demo.h"
+#include <zephyr/shell/shell.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/logging/log.h>
+#include <math.h>
+#include <stdlib.h>
+
+LOG_MODULE_REGISTER(quadrant_demo, LOG_LEVEL_INF);
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+// ============================================================================
+// GLOBAL CONFIGURATION
+// ============================================================================
+
+// Demo control flags
+volatile bool show_trail = true;        // Toggle ball trails
+volatile bool show_borders = false;     // Toggle border status indicators
+volatile bool cpu_load_active = false;  // CPU load simulation
+
+// Thread control
+volatile bool thread_running[4] = {true, true, true, true};
+volatile uint32_t thread_cycle_count[4] = {0};
+
+// Priority assignment (current priority for each quadrant thread)
+volatile int thread_priorities[4] = {5, 3, 7, 1};  // Initial: High, Med, Low, Lowest
+
+// Priority to color mapping
+// Priority value -> RGB color
+const rgb_t priority_colors[] = {
+    {0, 0, 0},       // Priority 0: Not used
+    {0, 255, 0},     // Priority 1 (Lowest): Red (GRB order)
+    {0, 128, 0},     // Priority 2: Dark red
+    {128, 255, 0},   // Priority 3 (Medium): Yellow
+    {64, 128, 0},    // Priority 4: Orange
+    {255, 0, 0},     // Priority 5 (High): Green
+    {128, 0, 128},   // Priority 6: Cyan
+    {0, 0, 255},     // Priority 7 (Very Low): Blue
+    {64, 0, 128}     // Priority 8: Purple
+};
+
+// Button semaphore
+K_SEM_DEFINE(button_sem, 0, 1);
+
+// Button configuration
+static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+static struct gpio_callback button_cb_data;
+
+// ============================================================================
+// THREAD STACKS AND DATA
+// ============================================================================
+#define STACK_SIZE 1024
+K_THREAD_STACK_DEFINE(quad1_stack, STACK_SIZE);
+K_THREAD_STACK_DEFINE(quad2_stack, STACK_SIZE);
+K_THREAD_STACK_DEFINE(quad3_stack, STACK_SIZE);
+K_THREAD_STACK_DEFINE(quad4_stack, STACK_SIZE);
+K_THREAD_STACK_DEFINE(monitor_stack, STACK_SIZE);
+K_THREAD_STACK_DEFINE(display_stack, STACK_SIZE);
+K_THREAD_STACK_DEFINE(button_stack, STACK_SIZE);
+
+struct k_thread quad1_thread_data;
+struct k_thread quad2_thread_data;
+struct k_thread quad3_thread_data;
+struct k_thread quad4_thread_data;
+struct k_thread monitor_thread_data;
+struct k_thread display_thread_data;
+struct k_thread button_thread_data;
+
+// ============================================================================
+// BOUNCING BALL ANIMATION (Used by all quadrants)
+// ============================================================================
+
+typedef struct {
+    float x, y;           // Ball position (within quadrant)
+    float vx, vy;         // Ball velocity
+    rgb_t trail[64];      // Trail buffer (8x8)
+} ball_state_t;
+
+// Ball states for each quadrant
+static ball_state_t ball_states[4] = {
+    {4.0f, 4.0f, 0.35f, 0.28f, {{0}}},  // Q1: Fast ball
+    {4.0f, 4.0f, 0.30f, 0.24f, {{0}}},  // Q2: Medium-fast ball
+    {4.0f, 4.0f, 0.25f, 0.20f, {{0}}},  // Q3: Medium-slow ball
+    {4.0f, 4.0f, 0.20f, 0.16f, {{0}}}   // Q4: Slow ball
+};
+
+void update_bouncing_ball(int quadrant_id, int offset_x, int offset_y) {
+    ball_state_t *ball = &ball_states[quadrant_id];
+
+    // Get color based on current priority
+    int priority = thread_priorities[quadrant_id];
+    rgb_t ball_color = priority_colors[priority];
+
+    // Update physics
+    ball->x += ball->vx;
+    ball->y += ball->vy;
+
+    // Bounce off quadrant walls
+    if (ball->x <= 0.5f || ball->x >= QUAD_WIDTH - 0.5f) {
+        ball->vx = -ball->vx;
+        ball->x = (ball->x <= 0.5f) ? 0.6f : QUAD_WIDTH - 0.6f;
+    }
+    if (ball->y <= 0.5f || ball->y >= QUAD_HEIGHT - 0.5f) {
+        ball->vy = -ball->vy;
+        ball->y = (ball->y <= 0.5f) ? 0.6f : QUAD_HEIGHT - 0.6f;
+    }
+
+    if (show_trail) {
+        // Fade trail
+        for (int i = 0; i < 64; i++) {
+            ball->trail[i].r = (uint8_t)(ball->trail[i].r * 0.85f);
+            ball->trail[i].g = (uint8_t)(ball->trail[i].g * 0.85f);
+            ball->trail[i].b = (uint8_t)(ball->trail[i].b * 0.85f);
+        }
+
+        // Add ball to trail
+        int ball_idx = ((int)ball->y * QUAD_WIDTH) + (int)ball->x;
+        if (ball_idx >= 0 && ball_idx < 64) {
+            ball->trail[ball_idx] = ball_color;
+        }
+
+        // Render trail to matrix
+        for (int y = 0; y < QUAD_HEIGHT; y++) {
+            for (int x = 0; x < QUAD_WIDTH; x++) {
+                int idx = y * QUAD_WIDTH + x;
+                ws2812_set_pixel(x + offset_x, y + offset_y, ball->trail[idx]);
+            }
+        }
+    } else {
+        // No trail - just draw solid ball (3x3)
+        for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+                int px = (int)(ball->x + 0.5f) + dx;
+                int py = (int)(ball->y + 0.5f) + dy;
+
+                if (px >= 0 && px < QUAD_WIDTH && py >= 0 && py < QUAD_HEIGHT) {
+                    ws2812_set_pixel(px + offset_x, py + offset_y, ball_color);
+                }
+            }
+        }
+    }
+
+    thread_cycle_count[quadrant_id]++;
+}
+
+// ============================================================================
+// THREAD ENTRY POINTS
+// ============================================================================
+
+void quad1_thread_entry(void *a, void *b, void *c) {
+    LOG_INF("Quadrant 1 thread started (Top-Left)");
+
+    while (1) {
+        k_mutex_lock(&matrix_mutex, K_FOREVER);
+
+        if (!show_trail) {
+            // Clear quadrant first if no trail
+            for (int y = 0; y < 8; y++) {
+                for (int x = 0; x < 8; x++) {
+                    ws2812_set_pixel(x, y, (rgb_t){0, 0, 0});
+                }
+            }
+        }
+
+        update_bouncing_ball(0, 0, 0);  // Top-left quadrant
+        k_mutex_unlock(&matrix_mutex);
+
+        k_msleep(50);  // 20 FPS target
+    }
+}
+
+void quad2_thread_entry(void *a, void *b, void *c) {
+    LOG_INF("Quadrant 2 thread started (Top-Right)");
+
+    while (1) {
+        k_mutex_lock(&matrix_mutex, K_FOREVER);
+
+        if (!show_trail) {
+            for (int y = 0; y < 8; y++) {
+                for (int x = 8; x < 16; x++) {
+                    ws2812_set_pixel(x, y, (rgb_t){0, 0, 0});
+                }
+            }
+        }
+
+        update_bouncing_ball(1, 8, 0);  // Top-right quadrant
+        k_mutex_unlock(&matrix_mutex);
+
+        k_msleep(75);  // ~13 FPS target
+    }
+}
+
+void quad3_thread_entry(void *a, void *b, void *c) {
+    LOG_INF("Quadrant 3 thread started (Bottom-Left)");
+
+    while (1) {
+        k_mutex_lock(&matrix_mutex, K_FOREVER);
+
+        if (!show_trail) {
+            for (int y = 8; y < 16; y++) {
+                for (int x = 0; x < 8; x++) {
+                    ws2812_set_pixel(x, y, (rgb_t){0, 0, 0});
+                }
+            }
+        }
+
+        update_bouncing_ball(2, 0, 8);  // Bottom-left quadrant
+        k_mutex_unlock(&matrix_mutex);
+
+        k_msleep(100);  // 10 FPS target
+    }
+}
+
+void quad4_thread_entry(void *a, void *b, void *c) {
+    LOG_INF("Quadrant 4 thread started (Bottom-Right)");
+
+    while (1) {
+        k_mutex_lock(&matrix_mutex, K_FOREVER);
+
+        if (!show_trail) {
+            for (int y = 8; y < 16; y++) {
+                for (int x = 8; x < 16; x++) {
+                    ws2812_set_pixel(x, y, (rgb_t){0, 0, 0});
+                }
+            }
+        }
+
+        update_bouncing_ball(3, 8, 8);  // Bottom-right quadrant
+        k_mutex_unlock(&matrix_mutex);
+
+        k_msleep(125);  // 8 FPS target
+    }
+}
+
+// ============================================================================
+// THREAD STATE MONITORING (Border visualization)
+// ============================================================================
+
+thread_state_viz_t get_thread_state(struct k_thread *thread) {
+    uint8_t state = thread->base.thread_state;
+
+    if (state & _THREAD_QUEUED) {
+        return THREAD_STATE_READY;
+    } else if (state & _THREAD_PENDING) {
+        return THREAD_STATE_SLEEPING;
+    } else if (state & _THREAD_SUSPENDED) {
+        return THREAD_STATE_SUSPENDED;
+    } else if (state == 0) {
+        return THREAD_STATE_RUNNING;
+    }
+
+    return THREAD_STATE_SLEEPING;
+}
+
+void update_thread_state_border(void) {
+    rgb_t state_colors[] = {
+        {0, 255, 0},    // RUNNING: Green
+        {255, 255, 0},  // READY: Yellow
+        {255, 0, 0},    // SLEEPING: Red
+        {0, 0, 255}     // SUSPENDED: Blue
+    };
+
+    thread_state_viz_t states[4] = {
+        get_thread_state(&quad1_thread_data),
+        get_thread_state(&quad2_thread_data),
+        get_thread_state(&quad3_thread_data),
+        get_thread_state(&quad4_thread_data)
+    };
+
+    // Top and bottom edges
+    for (int i = 0; i < 4; i++) {
+        rgb_t color = state_colors[states[i]];
+        for (int x = 0; x < 4; x++) {
+            ws2812_set_pixel(i * 4 + x, 0, color);
+            ws2812_set_pixel(i * 4 + x, MATRIX_HEIGHT - 1, color);
+        }
+    }
+
+    // Left and right edges
+    for (int i = 0; i < 4; i++) {
+        rgb_t color = state_colors[states[i]];
+        for (int y = 1; y < 5; y++) {
+            ws2812_set_pixel(0, i * 4 + y, color);
+            ws2812_set_pixel(MATRIX_WIDTH - 1, i * 4 + y, color);
+        }
+    }
+}
+
+void monitor_thread_entry(void *a, void *b, void *c) {
+    LOG_INF("Monitor thread started");
+
+    while (1) {
+        if (show_borders) {
+            k_mutex_lock(&matrix_mutex, K_FOREVER);
+            update_thread_state_border();
+            k_mutex_unlock(&matrix_mutex);
+        }
+        k_msleep(10);
+    }
+}
+
+// ============================================================================
+// DISPLAY THREAD
+// ============================================================================
+
+void display_thread_entry(void *a, void *b, void *c) {
+    LOG_INF("Display thread started");
+
+    while (1) {
+        k_mutex_lock(&matrix_mutex, K_FOREVER);
+        ws2812_update();
+        k_mutex_unlock(&matrix_mutex);
+        k_msleep(20);  // 50 FPS
+    }
+}
+
+// ============================================================================
+// BUTTON HANDLER (Priority Rotation)
+// ============================================================================
+
+void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins) {
+    k_sem_give(&button_sem);
+}
+
+void button_thread_entry(void *a, void *b, void *c) {
+    LOG_INF("Button handler thread started");
+
+    while (1) {
+        k_sem_take(&button_sem, K_FOREVER);
+
+        LOG_INF("Button pressed - Rotating priorities!");
+
+        // Rotate priorities: shift all by one position
+        int temp = thread_priorities[3];
+        thread_priorities[3] = thread_priorities[2];
+        thread_priorities[2] = thread_priorities[1];
+        thread_priorities[1] = thread_priorities[0];
+        thread_priorities[0] = temp;
+
+        // Apply new priorities to threads
+        struct k_thread *threads[] = {
+            &quad1_thread_data, &quad2_thread_data,
+            &quad3_thread_data, &quad4_thread_data
+        };
+
+        for (int i = 0; i < 4; i++) {
+            k_thread_priority_set(threads[i], thread_priorities[i]);
+        }
+
+        LOG_INF("New priorities: Q1=%d, Q2=%d, Q3=%d, Q4=%d",
+                thread_priorities[0], thread_priorities[1],
+                thread_priorities[2], thread_priorities[3]);
+        LOG_INF("Watch the ball colors change!");
+
+        // Debounce delay
+        k_msleep(500);
+    }
+}
+
+// ============================================================================
+// CPU LOAD SIMULATION
+// ============================================================================
+
+void cpu_load_thread(void *a, void *b, void *c) {
+    while (1) {
+        if (cpu_load_active) {
+            volatile uint32_t dummy = 0;
+            for (int i = 0; i < 100000; i++) {
+                dummy += i;
+            }
+        }
+        k_yield();
+    }
+}
+
+K_THREAD_STACK_DEFINE(cpuload_stack, 512);
+struct k_thread cpuload_thread_data;
+
+// ============================================================================
+// SHELL COMMANDS
+// ============================================================================
+
+int cmd_thread_suspend(const struct shell *sh, size_t argc, char **argv) {
+    if (argc != 2) {
+        shell_error(sh, "Usage: thread suspend <1-4>");
+        return -EINVAL;
+    }
+
+    int thread_num = atoi(argv[1]);
+    if (thread_num < 1 || thread_num > 4) {
+        shell_error(sh, "Thread number must be 1-4");
+        return -EINVAL;
+    }
+
+    struct k_thread *threads[] = {
+        &quad1_thread_data, &quad2_thread_data,
+        &quad3_thread_data, &quad4_thread_data
+    };
+
+    k_thread_suspend(threads[thread_num - 1]);
+    shell_print(sh, "Thread %d suspended - quadrant should go dark", thread_num);
+    return 0;
+}
+
+int cmd_thread_resume(const struct shell *sh, size_t argc, char **argv) {
+    if (argc != 2) {
+        shell_error(sh, "Usage: thread resume <1-4>");
+        return -EINVAL;
+    }
+
+    int thread_num = atoi(argv[1]);
+    if (thread_num < 1 || thread_num > 4) {
+        shell_error(sh, "Thread number must be 1-4");
+        return -EINVAL;
+    }
+
+    struct k_thread *threads[] = {
+        &quad1_thread_data, &quad2_thread_data,
+        &quad3_thread_data, &quad4_thread_data
+    };
+
+    k_thread_resume(threads[thread_num - 1]);
+    shell_print(sh, "Thread %d resumed - ball should appear", thread_num);
+    return 0;
+}
+
+int cmd_thread_stats(const struct shell *sh, size_t argc, char **argv) {
+    struct k_thread *threads[] = {
+        &quad1_thread_data, &quad2_thread_data,
+        &quad3_thread_data, &quad4_thread_data
+    };
+
+    const char *names[] = {"Q1-TopLeft", "Q2-TopRight", "Q3-BotLeft", "Q4-BotRight"};
+    const char *state_names[] = {"Running", "Ready", "Sleeping", "Suspended"};
+
+    shell_print(sh, "\n=== Bouncing Ball Demo - Thread Statistics ===");
+    shell_print(sh, "Thread | Quadrant    | Priority | State     | Cycles");
+    shell_print(sh, "-------|-------------|----------|-----------|--------");
+
+    for (int i = 0; i < 4; i++) {
+        thread_state_viz_t state = get_thread_state(threads[i]);
+        int priority = thread_priorities[i];
+
+        shell_print(sh, "  %d    | %-11s | %8d | %-9s | %u",
+                    i + 1, names[i], priority,
+                    state_names[state], thread_cycle_count[i]);
+    }
+
+    shell_print(sh, "\nCPU Load: %s", cpu_load_active ? "ON" : "OFF");
+    shell_print(sh, "Trail: %s", show_trail ? "ON" : "OFF");
+    shell_print(sh, "Borders: %s\n", show_borders ? "ON" : "OFF");
+    return 0;
+}
+
+int cmd_trail(const struct shell *sh, size_t argc, char **argv) {
+    if (argc != 2) {
+        shell_error(sh, "Usage: trail <on|off>");
+        return -EINVAL;
+    }
+
+    if (strcmp(argv[1], "on") == 0) {
+        show_trail = true;
+        shell_print(sh, "Ball trails enabled");
+    } else if (strcmp(argv[1], "off") == 0) {
+        show_trail = false;
+        // Clear screen when disabling trails
+        k_mutex_lock(&matrix_mutex, K_FOREVER);
+        ws2812_clear();
+        k_mutex_unlock(&matrix_mutex);
+        shell_print(sh, "Ball trails disabled - showing solid balls only");
+    } else {
+        shell_error(sh, "Use 'on' or 'off'");
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
+int cmd_borders(const struct shell *sh, size_t argc, char **argv) {
+    if (argc != 2) {
+        shell_error(sh, "Usage: borders <on|off>");
+        return -EINVAL;
+    }
+
+    if (strcmp(argv[1], "on") == 0) {
+        show_borders = true;
+        shell_print(sh, "Border status indicators enabled");
+        shell_print(sh, "Colors: Green=Running, Yellow=Ready, Red=Sleeping, Blue=Suspended");
+    } else if (strcmp(argv[1], "off") == 0) {
+        show_borders = false;
+        shell_print(sh, "Border status indicators disabled");
+    } else {
+        shell_error(sh, "Use 'on' or 'off'");
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
+int cmd_cpuload(const struct shell *sh, size_t argc, char **argv) {
+    if (argc != 2) {
+        shell_error(sh, "Usage: cpuload <on|off>");
+        return -EINVAL;
+    }
+
+    if (strcmp(argv[1], "on") == 0) {
+        cpu_load_active = true;
+        shell_print(sh, "CPU load simulation ENABLED");
+        shell_print(sh, "");
+        shell_print(sh, "What to watch:");
+        shell_print(sh, "- High priority ball (green): Stays smooth");
+        shell_print(sh, "- Low priority balls: Become jerky/laggy");
+        shell_print(sh, "");
+        shell_print(sh, "This simulates a busy system!");
+    } else if (strcmp(argv[1], "off") == 0) {
+        cpu_load_active = false;
+        shell_print(sh, "CPU load simulation disabled");
+        shell_print(sh, "All balls should be smooth again");
+    } else {
+        shell_error(sh, "Use 'on' or 'off'");
+        return -EINVAL;
+    }
+
+    return 0;
+}
+
+// ============================================================================
+// SHELL COMMAND REGISTRATION
+// ============================================================================
+
+SHELL_STATIC_SUBCMD_SET_CREATE(sub_thread,
+    SHELL_CMD(suspend, NULL, "Suspend thread <1-4>", cmd_thread_suspend),
+    SHELL_CMD(resume, NULL, "Resume thread <1-4>", cmd_thread_resume),
+    SHELL_CMD(stats, NULL, "Show thread statistics", cmd_thread_stats),
+    SHELL_SUBCMD_SET_END
+);
+
+SHELL_CMD_REGISTER(thread, &sub_thread, "Thread control commands", NULL);
+SHELL_CMD_REGISTER(trail, NULL, "Toggle ball trails <on|off>", cmd_trail);
+SHELL_CMD_REGISTER(borders, NULL, "Toggle border indicators <on|off>", cmd_borders);
+SHELL_CMD_REGISTER(cpuload, NULL, "CPU load simulation <on|off>", cmd_cpuload);
+
+// ============================================================================
+// MAIN INITIALIZATION
+// ============================================================================
+
+void quadrant_demo_init(void) {
+    int ret;
+
+    LOG_INF("===========================================");
+    LOG_INF("  Priority Demonstration - Bouncing Balls");
+    LOG_INF("===========================================");
+    LOG_INF("TESTING MODE: Only Quadrant 1 active");
+    LOG_INF("Use 'thread resume <2-4>' to test other quadrants");
+    LOG_INF("");
+    LOG_INF("Initial State:");
+    LOG_INF("  Q1 (Top-Left):    GREEN ball - RUNNING");
+    LOG_INF("  Q2 (Top-Right):   SUSPENDED");
+    LOG_INF("  Q3 (Bottom-Left): SUSPENDED");
+    LOG_INF("  Q4 (Bottom-Right): SUSPENDED");
+    LOG_INF("");
+    LOG_INF("Priority Colors:");
+    LOG_INF("  GREEN  = High priority (5)");
+    LOG_INF("  YELLOW = Medium priority (3)");
+    LOG_INF("  BLUE   = Low priority (7)");
+    LOG_INF("  RED    = Lowest priority (1)");
+    LOG_INF("===========================================");
+
+    // Configure button
+    if (!device_is_ready(button.port)) {
+        LOG_ERR("Button device not ready");
+        return;
+    }
+
+    ret = gpio_pin_configure_dt(&button, GPIO_INPUT);
+    if (ret < 0) {
+        LOG_ERR("Failed to configure button: %d", ret);
+        return;
+    }
+
+    ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
+    if (ret < 0) {
+        LOG_ERR("Failed to configure button interrupt: %d", ret);
+        return;
+    }
+
+    gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
+    gpio_add_callback(button.port, &button_cb_data);
+    LOG_INF("Button SW0 configured");
+
+    // Create CPU load thread
+    k_thread_create(&cpuload_thread_data, cpuload_stack, 512,
+                    cpu_load_thread, NULL, NULL, NULL,
+                    K_LOWEST_APPLICATION_THREAD_PRIO, 0, K_NO_WAIT);
+    k_thread_name_set(&cpuload_thread_data, "cpuload");
+
+    // Create button handler thread
+    k_thread_create(&button_thread_data, button_stack, STACK_SIZE,
+                    button_thread_entry, NULL, NULL, NULL,
+                    2, 0, K_NO_WAIT);  // High priority for button response
+    k_thread_name_set(&button_thread_data, "button");
+
+    // TESTING MODE: Create quadrant threads with initial priorities
+    // Only Quadrant 1 enabled, others suspended for testing
+
+    k_thread_create(&quad1_thread_data, quad1_stack, STACK_SIZE,
+                    quad1_thread_entry, NULL, NULL, NULL,
+                    thread_priorities[0], 0, K_NO_WAIT);
+    k_thread_name_set(&quad1_thread_data, "quad1");
+    // Q1 running
+
+    k_thread_create(&quad2_thread_data, quad2_stack, STACK_SIZE,
+                    quad2_thread_entry, NULL, NULL, NULL,
+                    thread_priorities[1], 0, K_NO_WAIT);
+    k_thread_name_set(&quad2_thread_data, "quad2");
+    k_thread_suspend(&quad2_thread_data);  // SUSPENDED for testing
+
+    k_thread_create(&quad3_thread_data, quad3_stack, STACK_SIZE,
+                    quad3_thread_entry, NULL, NULL, NULL,
+                    thread_priorities[2], 0, K_NO_WAIT);
+    k_thread_name_set(&quad3_thread_data, "quad3");
+    k_thread_suspend(&quad3_thread_data);  // SUSPENDED for testing
+
+    k_thread_create(&quad4_thread_data, quad4_stack, STACK_SIZE,
+                    quad4_thread_entry, NULL, NULL, NULL,
+                    thread_priorities[3], 0, K_NO_WAIT);
+    k_thread_name_set(&quad4_thread_data, "quad4");
+    k_thread_suspend(&quad4_thread_data);  // SUSPENDED for testing
+
+    // Create monitor thread (starts disabled)
+    k_thread_create(&monitor_thread_data, monitor_stack, STACK_SIZE,
+                    monitor_thread_entry, NULL, NULL, NULL,
+                    4, 0, K_NO_WAIT);
+    k_thread_name_set(&monitor_thread_data, "monitor");
+
+    // Create display thread
+    k_thread_create(&display_thread_data, display_stack, STACK_SIZE,
+                    display_thread_entry, NULL, NULL, NULL,
+                    6, 0, K_NO_WAIT);
+    k_thread_name_set(&display_thread_data, "display");
+
+    LOG_INF("All threads created!");
+    LOG_INF("");
+    LOG_INF("Commands:");
+    LOG_INF("  thread stats        - Show priority and status");
+    LOG_INF("  cpuload on/off      - Simulate busy system");
+    LOG_INF("  trail on/off        - Toggle ball trails");
+    LOG_INF("  borders on/off      - Toggle status borders");
+    LOG_INF("");
+    LOG_INF("Demo running! Press SW0 to rotate priorities");
+}
