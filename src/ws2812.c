@@ -170,34 +170,7 @@ void ws2812_update(void) {
     k_usleep(60);
     
 }
-void ws2812_zeroes(void) {
-    // Send all zeros to turn off all LEDs
-    // Buffer size: same as normal update to ensure proper reset timing
-    static uint8_t spi_buf[22 + (NUM_LEDS - 1) * 3 * 8 + 8];
 
-    // Fill entire buffer with zeros
-    memset(spi_buf, 0x00, sizeof(spi_buf));
-
-    // Send via SPI
-    const struct spi_buf tx_buf = {
-        .buf = spi_buf,
-        .len = sizeof(spi_buf)
-    };
-    const struct spi_buf_set tx = {
-        .buffers = &tx_buf,
-        .count = 1
-    };
-
-    int ret = spi_write(spi_dev, &spi_cfg, &tx);
-    if (ret < 0) {
-        LOG_ERR("SPI write failed: %d", ret);
-    } else {
-        LOG_DBG("SPI zeroes - sent %d bytes", sizeof(spi_buf));
-    }
-
-    // WS2812 needs >50us reset time
-    k_usleep(60);
-}
 
 void ws2812_set_brightness(uint8_t brightness) {
     global_brightness = brightness;

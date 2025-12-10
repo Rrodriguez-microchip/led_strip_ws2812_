@@ -317,7 +317,7 @@ void simple_quad2_thread_entry(void *a, void *b, void *c) {
         simple_quad2_animation(10);  // Fixed cyan color (index 10)
         ws2812_update();  // Update display immediately while we have the lock
         k_mutex_unlock(&matrix_mutex);
-        k_msleep(50);  // 20 FPS
+        k_msleep(45);  // 20 FPS
     }
 }
 
@@ -438,12 +438,6 @@ void simple_test_init(void) {
                     8, 0, K_NO_WAIT);  // Lowest - slowest
     k_thread_name_set(&simple_quad4_thread_data, "quad4");
 
-    // Display thread is no longer needed - each quadrant updates display after drawing
-    // This eliminates race conditions where display reads partially-updated buffer
-    // k_thread_create(&simple_display_thread_data, simple_display_stack, 1024,
-    //                 simple_display_thread_entry, NULL, NULL, NULL,
-    //                 7, 0, K_NO_WAIT);
-    // k_thread_name_set(&simple_display_thread_data, "display");
 
     LOG_INF("Simple test running - 4 quadrants (each updates display independently)!");
 }
