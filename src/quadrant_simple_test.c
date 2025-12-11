@@ -23,6 +23,7 @@ static struct gpio_callback button_cb_data;
 // We'll cycle through: 2 (highest), 4 (high), 6 (medium), 8 (low)
 static const int priority_levels[] = {2, 4, 6, 8};
 static const char *priority_names[] = {"HIGHEST", "HIGH", "MEDIUM", "LOW"};
+static const float speed_levels[] = {1.5f, 1.0f, 0.8f, 1.2f};  // Match Q2, unique, Q3, Q4 speeds
 static int current_priority_index = 1;  // Start at priority 4 (HIGH)
 static volatile bool priority_changed = false;
 
@@ -43,21 +44,25 @@ static float ball1_x = 4.0f;
 static float ball1_y = 4.0f;
 static float ball1_vx = 0.3f;
 static float ball1_vy = 0.25f;
+static float ball1_speed = 1.0f;  // Speed multiplier (1.0 = normal)
 
 static float ball2_x = 4.0f;
 static float ball2_y = 4.0f;
 static float ball2_vx = 0.3f;
 static float ball2_vy = 0.25f;
+static float ball2_speed = 1.5f;  // 1.5x faster
 
 static float ball3_x = 4.0f;
 static float ball3_y = 4.0f;
 static float ball3_vx = 0.3f;
 static float ball3_vy = 0.25f;
+static float ball3_speed = 0.8f;  // 0.8x speed (slower)
 
 static float ball4_x = 4.0f;
 static float ball4_y = 4.0f;
 static float ball4_vx = 0.3f;
 static float ball4_vy = 0.25f;
+static float ball4_speed = 1.2f;  // 1.2x faster
 
 // Quadrant colors (rgb_t struct is {g, r, b} order, but LEDs expect BGR order)
 // To get specific colors with BGR LEDs: B=1st byte, G=2nd byte, R=3rd byte
@@ -88,9 +93,9 @@ static rgb_t get_priority_color(int priority_level) {
 }
 
 void simple_quad1_animation(int priority) {
-    // Update physics
-    ball1_x += ball1_vx;
-    ball1_y += ball1_vy;
+    // Update physics with speed multiplier
+    ball1_x += ball1_vx * ball1_speed;
+    ball1_y += ball1_vy * ball1_speed;
 
     // Bounce off quadrant walls (8x8, ball is 2x2 so max is 6.0)
     if (ball1_x <= 0.5f || ball1_x >= 6.5f) {
@@ -136,9 +141,9 @@ void simple_quad1_animation(int priority) {
 }
 
 void simple_quad2_animation(int priority) {
-    // Update physics
-    ball2_x += ball2_vx;
-    ball2_y += ball2_vy;
+    // Update physics with speed multiplier
+    ball2_x += ball2_vx * ball2_speed;
+    ball2_y += ball2_vy * ball2_speed;
 
     // Bounce off quadrant walls (8x8, ball is 2x2 so max is 6.0)
     if (ball2_x <= 0.5f || ball2_x >= 6.5f) {
@@ -184,9 +189,9 @@ void simple_quad2_animation(int priority) {
 }
 
 void simple_quad3_animation(int priority) {
-    // Update physics
-    ball3_x += ball3_vx;
-    ball3_y += ball3_vy;
+    // Update physics with speed multiplier
+    ball3_x += ball3_vx * ball3_speed;
+    ball3_y += ball3_vy * ball3_speed;
 
     // Bounce off quadrant walls (8x8, ball is 2x2 so max is 6.0)
     if (ball3_x <= 0.5f || ball3_x >= 6.5f) {
@@ -232,9 +237,9 @@ void simple_quad3_animation(int priority) {
 }
 
 void simple_quad4_animation(int priority) {
-    // Update physics
-    ball4_x += ball4_vx;
-    ball4_y += ball4_vy;
+    // Update physics with speed multiplier
+    ball4_x += ball4_vx * ball4_speed;
+    ball4_y += ball4_vy * ball4_speed;
 
     // Bounce off quadrant walls (8x8, ball is 2x2 so max is 6.0)
     if (ball4_x <= 0.5f || ball4_x >= 6.5f) {
@@ -287,21 +292,47 @@ void simple_quad1_thread_entry(void *a, void *b, void *c) {
     LOG_INF("Quadrant 1 thread started - priority demo ball");
 
     while (1) {
-        // Check if priority changed and update this thread's priority
+        // Check if priority changed and update this thread's priority AND speed
         if (priority_changed) {
             k_thread_priority_set(k_current_get(), priority_levels[current_priority_index]);
+            ball1_speed = speed_levels[current_priority_index];  // Update speed to match priority
+
+            // Copy position and velocity from matching quadrant
+            switch (priority_levels[current_priority_index]) {
+                case 2:  // Match Q2
+                    ball1_x = ball2_x;
+                    ball1_y = ball2_y;
+                    ball1_vx = ball2_vx;
+                    ball1_vy = ball2_vy;
+                    break;
+                case 6:  // Match Q3
+                    ball1_x = ball3_x;
+                    ball1_y = ball3_y;
+                    ball1_vx = ball3_vx;
+                    ball1_vy = ball3_vy;
+                    break;
+                case 8:  // Match Q4
+                    ball1_x = ball4_x;
+                    ball1_y = ball4_y;
+                    ball1_vx = ball4_vx;
+                    ball1_vy = ball4_vy;
+                    break;
+                // Priority 4 keeps its own unique pattern
+            }
+
             priority_changed = false;  // Reset flag after applying
-            LOG_INF("Q1 now at priority %s (%d) - watch the ball color change!",
+            LOG_INF("Q1 now at priority %s (%d), speed %.1fx - watch the ball color and speed change!",
                     priority_names[current_priority_index],
-                    priority_levels[current_priority_index]);
+                    priority_levels[current_priority_index],
+                    ball1_speed);
         }
 
         k_mutex_lock(&matrix_mutex, K_FOREVER);
         // Pass current priority level to animation for dynamic color
         simple_quad1_animation(priority_levels[current_priority_index]);
-        ws2812_update();  // Update display immediately while we have the lock
+        // Display thread handles ws2812_update() now
         k_mutex_unlock(&matrix_mutex);
-        k_msleep(50);  // 20 FPS
+        k_msleep(50);  // 20 FPS - speed controlled by ball1_speed multiplier
     }
 }
 
@@ -315,9 +346,9 @@ void simple_quad2_thread_entry(void *a, void *b, void *c) {
     while (1) {
         k_mutex_lock(&matrix_mutex, K_FOREVER);
         simple_quad2_animation(10);  // Fixed cyan color (index 10)
-        ws2812_update();  // Update display immediately while we have the lock
+        // Display thread handles ws2812_update() now
         k_mutex_unlock(&matrix_mutex);
-        k_msleep(45);  // 20 FPS
+        k_msleep(50);  // 20 FPS - speed controlled by ball2_speed multiplier
     }
 }
 
@@ -331,9 +362,9 @@ void simple_quad3_thread_entry(void *a, void *b, void *c) {
     while (1) {
         k_mutex_lock(&matrix_mutex, K_FOREVER);
         simple_quad3_animation(11);  // Fixed yellow color (index 11)
-        ws2812_update();  // Update display immediately while we have the lock
+        // Display thread handles ws2812_update() now
         k_mutex_unlock(&matrix_mutex);
-        k_msleep(50);  // 20 FPS
+        k_msleep(50);  // 20 FPS - speed controlled by ball3_speed multiplier
     }
 }
 
@@ -347,24 +378,24 @@ void simple_quad4_thread_entry(void *a, void *b, void *c) {
     while (1) {
         k_mutex_lock(&matrix_mutex, K_FOREVER);
         simple_quad4_animation(12);  // Fixed blue color (index 12)
-        ws2812_update();  // Update display immediately while we have the lock
+        // Display thread handles ws2812_update() now
         k_mutex_unlock(&matrix_mutex);
-        k_msleep(50);  // 20 FPS
+        k_msleep(50);  // 20 FPS - speed controlled by ball4_speed multiplier
     }
 }
 
-// Display thread (renamed to avoid conflicts)
-K_THREAD_STACK_DEFINE(simple_display_stack, 1024);
-struct k_thread simple_display_thread_data;
+// Display thread - handles all LED refreshes at fixed rate
+K_THREAD_STACK_DEFINE(display_stack, 1024);
+struct k_thread display_thread_data;
 
-void simple_display_thread_entry(void *a, void *b, void *c) {
-    LOG_INF("Display thread started");
+void display_thread_entry(void *a, void *b, void *c) {
+    LOG_INF("Display thread started - 50 FPS refresh");
 
     while (1) {
         k_mutex_lock(&matrix_mutex, K_FOREVER);
-        ws2812_update();
+        ws2812_update();  // Refresh LEDs with current buffer contents
         k_mutex_unlock(&matrix_mutex);
-        k_msleep(20);  // 50 FPS
+        k_msleep(20);  // 50 FPS (20ms per frame)
     }
 }
 
@@ -438,6 +469,11 @@ void simple_test_init(void) {
                     8, 0, K_NO_WAIT);  // Lowest - slowest
     k_thread_name_set(&simple_quad4_thread_data, "quad4");
 
+    // Create display thread - HIGHEST priority (1) so it always gets to refresh
+    k_thread_create(&display_thread_data, display_stack, 1024,
+                    display_thread_entry, NULL, NULL, NULL,
+                    1, 0, K_NO_WAIT);  // Priority 1 - highest, ensures consistent refresh
+    k_thread_name_set(&display_thread_data, "display");
 
-    LOG_INF("Simple test running - 4 quadrants (each updates display independently)!");
+    LOG_INF("Simple test running - 4 animation threads + 1 display thread!");
 }
